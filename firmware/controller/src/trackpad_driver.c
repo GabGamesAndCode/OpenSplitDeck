@@ -14,7 +14,7 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(trackpad_driver, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(trackpad_driver, LOG_LEVEL_ERR);
 
 // Driver state and configuration
 static bool driver_initialized = false;

@@ -21,7 +21,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(iqs7211e, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(iqs7211e, LOG_LEVEL_ERR);
 
 /* Private Global Variables */
 static bool iqs7211e_deviceRDY = false;
@@ -246,7 +246,7 @@ bool iqs7211e_init(iqs7211e_instance_t *instance)
       // Force initial data read to complete initialization - don't wait for RDY yet
       LOG_INF("\tIQS7211E_INIT_READ_DATA (forcing for initial config)");
       iqs7211e_queueValueUpdates(instance);
-      instance->iqs7211e_state.init_state = IQS7211E_INIT_ACTIVATE_EVENT_MODE;
+      instance->iqs7211e_state.init_state = IQS7211E_INIT_ACTIVATE_STREAM_MODE;
     break;
 
     /* Turn on I2C Event mode */
@@ -259,12 +259,10 @@ bool iqs7211e_init(iqs7211e_instance_t *instance)
 
     /* Turn on I2C Stream mode */
     case IQS7211E_INIT_ACTIVATE_STREAM_MODE:
-      if(iqs7211e_deviceRDY)
-      {
-        LOG_INF("\tIQS7211E_INIT_ACTIVATE_STREAM_MODE");
-        iqs7211e_setStreamMode(instance, STOP);
-        instance->iqs7211e_state.init_state = IQS7211E_INIT_DONE;
-      }
+      // Force stream mode activation to complete initialization
+      LOG_INF("\tIQS7211E_INIT_ACTIVATE_STREAM_MODE (forcing for initial config)");
+      iqs7211e_setStreamMode(instance, STOP);
+      instance->iqs7211e_state.init_state = IQS7211E_INIT_DONE;
     break;
 
     /* If all operations have been completed correctly, the RDY pin can be set

@@ -5,7 +5,7 @@
 
 #include "imu_driver.h"
 
-LOG_MODULE_REGISTER(imu_driver, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(imu_driver, LOG_LEVEL_ERR);
 
 // Global IMU context
 static imu_context_t imu_ctx = {

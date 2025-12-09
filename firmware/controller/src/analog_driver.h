@@ -260,4 +260,29 @@ const char* analog_driver_get_channel_name(analog_channel_id_t channel_id);
  */
 analog_status_t analog_driver_full_calibration(uint32_t delay_ms);
 
+/**
+ * @brief Start interactive calibration mode (move stick in circles, pull trigger)
+ * @param duration_ms How long to collect calibration data (in milliseconds)
+ * @return analog_status_t Status of interactive calibration
+ */
+analog_status_t analog_driver_interactive_calibration(uint32_t duration_ms);
+
+/**
+ * @brief Begin calibration data collection (resets min/max tracking)
+ * @return analog_status_t Status of operation
+ */
+analog_status_t analog_driver_begin_calibration_collection(void);
+
+/**
+ * @brief Update calibration with current analog values (call repeatedly during movement)
+ * @return analog_status_t Status of operation
+ */
+analog_status_t analog_driver_update_calibration_data(void);
+
+/**
+ * @brief Finalize calibration and apply the collected min/max values
+ * @return analog_status_t Status of operation
+ */
+analog_status_t analog_driver_finalize_calibration(void);
+
 #endif // ANALOG_DRIVER_H

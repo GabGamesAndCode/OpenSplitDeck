@@ -6,7 +6,7 @@
 #include "haptic_driver.h"
 #include "drv2605.h"
 
-LOG_MODULE_REGISTER(haptic_driver, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(haptic_driver, LOG_LEVEL_ERR);
 
 // Global haptic context
 static haptic_context_t haptic_ctx = {

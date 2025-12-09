@@ -15,7 +15,7 @@
 #include <math.h>
 #include <stdlib.h>
 
-LOG_MODULE_REGISTER(analog_driver, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(analog_driver, LOG_LEVEL_ERR);
 
 // Global context
 static analog_driver_context_t g_analog_ctx = {0};
@@ -237,91 +237,99 @@ analog_status_t analog_driver_read_all(void)
         if (i == ANALOG_CHANNEL_TRIGGER)
         {
             // Simple trigger scaling: map raw value between min/max to 0-255
-            // For your hardware: rest=1500, pressed=1000
-            // We want: 1500→0, 1000→255
+            // For your hardware: rest=~1563, pressed=~718
+            // We want: rest→0 (not pressing), pressed→255 (fully pressed)
             // The trigger is INVERTED: higher raw value = less pressed
 
-            int32_t rest_value = cal->max_value;   // 1500 (trigger released)
-            int32_t pressed_value = cal->min_value; // 1000 (trigger pressed)
-
-            // Don't clamp input - let the scaling handle out-of-range values
+            int32_t rest_value = cal->max_value;     // ~1563 (trigger at rest)
+            int32_t pressed_value = cal->min_value;  // ~718 (trigger fully pressed)
             int32_t current_value = calibrated_value;
 
-            // Calculate range
-            int32_t range = rest_value - pressed_value; // 1500 - 1000 = 500
+            // Deadzone calculations
+            int32_t trigger_range = rest_value - pressed_value; // ~845
+            int32_t bottom_deadzone = cal->deadzone; // 20% of range (~169)
+            int32_t top_deadzone = cal->deadzone / 2; // 10% of range (~84)
+            
             int32_t scaled;
+            
+            // Check if in bottom deadzone (near rest position)
+            // If current_value is close to rest_value (within bottom_deadzone), snap to 0
+            if (current_value >= (rest_value - bottom_deadzone)) {
+                scaled = 0; // Trigger at rest
+            }
+            // Check if in top deadzone (fully pressed)
+            // If current_value is close to pressed_value (within top_deadzone), snap to 255
+            else if (current_value <= (pressed_value + top_deadzone)) {
+                scaled = 255; // Trigger fully pressed
+            }
+            else {
+                // In the active range between deadzones
+                int32_t active_rest = rest_value - bottom_deadzone;
+                int32_t active_pressed = pressed_value + top_deadzone;
+                int32_t active_range = active_rest - active_pressed;
 
-            // Inverted scaling: rest_value (1500) → 0, pressed_value (1000) → 255
-            scaled = ((rest_value - current_value) * 255) / range;
+                // Map from active range to 0-255
+                // active_rest → 0, active_pressed → 255
+                scaled = ((active_rest - current_value) * 255) / active_range;
 
-            // Clamp output to 0-255 range for uint8_t
-            if (scaled < 0)
-                scaled = 0;
-            if (scaled > 255)
-                scaled = 255;
+                // Clamp to valid range
+                if (scaled < 0) scaled = 0;
+                if (scaled > 255) scaled = 255;
+            }
 
-            // Store as uint8_t in the trigger_value union member
             data->controller_value.trigger_value = (uint8_t)scaled;
-            data->in_deadzone = false;
+            data->in_deadzone = (scaled == 0);
         }
         else
         {
-            // Stick: -127 to +127 with deadzone around center
+            // Stick: -127 to +127 - scale without per-axis deadzone (will apply square deadzone later)
             int16_t offset_from_center = calibrated_value - cal->center_value;
+            int32_t scaled = 0;
 
-            // Invert Y axis (channel 1)
-            if (i == ANALOG_CHANNEL_STICK_Y) {
-                offset_from_center = -offset_from_center;
-            }
-
-            if (abs(offset_from_center) <= cal->deadzone)
+            if (offset_from_center > 0)
             {
-                data->controller_value.stick_value = 0;
-                data->in_deadzone = true;
+                // Positive direction - with 5% outer deadzone
+                int32_t total_range = cal->max_value - (cal->center_value + cal->deadzone);
+                int32_t outer_deadzone = total_range * 0.05f;
+                int32_t range = total_range - outer_deadzone;
+                int32_t offset_value = offset_from_center - cal->deadzone;
+
+                if (range > 0)
+                {
+                    scaled = (offset_value * 127) / range;
+                }
+
+                if (scaled > 127)
+                    scaled = 127;
+                if (scaled < 0)
+                    scaled = 0;
             }
             else
             {
-                int32_t scaled = 0;
+                // Negative direction - with 5% outer deadzone
+                int32_t total_range = (cal->center_value - cal->deadzone) - cal->min_value;
+                int32_t outer_deadzone = total_range * 0.05f;
+                int32_t range = total_range - outer_deadzone;
+                int32_t offset_value = abs(offset_from_center) - cal->deadzone;
 
-                if (offset_from_center > 0)
+                if (range > 0)
                 {
-                    // Positive direction
-                    int32_t range = cal->max_value - (cal->center_value + cal->deadzone);
-                    int32_t offset_value = offset_from_center - cal->deadzone;
-
-                    if (range > 0)
-                    {
-                        scaled = (offset_value * 127) / range;
-                    }
-
-                    // Clamp BEFORE casting
-                    if (scaled > 127)
-                        scaled = 127;
-                    if (scaled < 0)
-                        scaled = 0;
-                }
-                else
-                {
-                    // Negative direction
-                    int32_t range = (cal->center_value - cal->deadzone) - cal->min_value;
-                    int32_t offset_value = abs(offset_from_center) - cal->deadzone;
-
-                    if (range > 0)
-                    {
-                        scaled = -((offset_value * 127) / range);
-                    }
-
-                    // Clamp BEFORE casting
-                    if (scaled < -127)
-                        scaled = -127;
-                    if (scaled > 0)
-                        scaled = 0;
+                    scaled = -((offset_value * 127) / range);
                 }
 
-                // Now safe to cast
-                data->controller_value.stick_value = (int8_t)scaled;
-                data->in_deadzone = false;
+                if (scaled < -127)
+                    scaled = -127;
+                if (scaled > 0)
+                    scaled = 0;
             }
+
+            // Invert Y axis AFTER scaling (channel 1)
+            if (i == ANALOG_CHANNEL_STICK_Y) {
+                scaled = -scaled;
+            }
+
+            data->controller_value.stick_value = (int8_t)scaled;
+            data->in_deadzone = false;
         }
     }
 
@@ -455,8 +463,50 @@ analog_status_t analog_driver_get_controller_data(analog_controller_data_t *data
     // Thread-safe data access
     k_mutex_lock(&g_analog_ctx.data_mutex, K_FOREVER);
     
-    data->stick_x = g_analog_ctx.channel_data[ANALOG_CHANNEL_STICK_X].controller_value.stick_value;
-    data->stick_y = g_analog_ctx.channel_data[ANALOG_CHANNEL_STICK_Y].controller_value.stick_value;
+    int8_t raw_stick_x = g_analog_ctx.channel_data[ANALOG_CHANNEL_STICK_X].controller_value.stick_value;
+    int8_t raw_stick_y = g_analog_ctx.channel_data[ANALOG_CHANNEL_STICK_Y].controller_value.stick_value;
+    
+    // Square deadzone - check if BOTH axes are within deadzone (5 units in output space)
+    int8_t deadzone = 5;
+    if (abs(raw_stick_x) <= deadzone && abs(raw_stick_y) <= deadzone) {
+        // Both axes within deadzone - zero both
+        data->stick_x = 0;
+        data->stick_y = 0;
+    } else {
+        // Outside deadzone - apply circular normalization to prevent corner boosting
+        // Calculate magnitude squared to avoid sqrt
+        int32_t x_squared = (int32_t)raw_stick_x * raw_stick_x;
+        int32_t y_squared = (int32_t)raw_stick_y * raw_stick_y;
+        int32_t magnitude_squared = x_squared + y_squared;
+        int32_t max_squared = 127 * 127; // 16129
+        
+        // Only normalize if magnitude exceeds max stick value
+        if (magnitude_squared > max_squared) {
+        // Simple approximation: scale both axes by sqrt(max_squared / magnitude_squared)
+        // Equivalent to: new_value = old_value * (127 / magnitude)
+        // Using fixed-point math: multiply by 127, then divide by approximate magnitude
+        
+        // Approximate sqrt using a simple iterative method
+        int32_t magnitude = 127; // Start guess
+        for (int i = 0; i < 4; i++) { // 4 iterations is enough for 8-bit values
+            magnitude = (magnitude + magnitude_squared / magnitude) / 2;
+        }
+        
+        // Scale down to fit in circle
+        if (magnitude > 0) {
+            data->stick_x = (int8_t)((raw_stick_x * 127) / magnitude);
+            data->stick_y = (int8_t)((raw_stick_y * 127) / magnitude);
+            } else {
+                data->stick_x = raw_stick_x;
+                data->stick_y = raw_stick_y;
+            }
+        } else {
+            // Within circle, no normalization needed
+            data->stick_x = raw_stick_x;
+            data->stick_y = raw_stick_y;
+        }
+    }
+    
     data->trigger = g_analog_ctx.channel_data[ANALOG_CHANNEL_TRIGGER].controller_value.trigger_value;
     
     k_mutex_unlock(&g_analog_ctx.data_mutex);
@@ -559,54 +609,78 @@ static void adc_thread_function(void *arg1, void *arg2, void *arg3)
             int16_t calibrated_value = (int16_t)data->filtered_value;
 
             if (i == ANALOG_CHANNEL_TRIGGER) {
-                // Trigger scaling (inverted)
-                int32_t rest_value = cal->max_value;
-                int32_t pressed_value = cal->min_value;
+                // Trigger scaling with dual deadzones (same logic as analog_driver_read_all)
+                int32_t rest_value = cal->max_value;     // ~1563 (trigger at rest)
+                int32_t pressed_value = cal->min_value;  // ~718 (trigger fully pressed)
                 int32_t current_value = calibrated_value;
-                int32_t range = rest_value - pressed_value;
-                int32_t scaled = ((rest_value - current_value) * 255) / range;
+
+                // Deadzone calculations
+                int32_t trigger_range = rest_value - pressed_value;
+                int32_t bottom_deadzone = cal->deadzone;     // 20% of range
+                int32_t top_deadzone = cal->deadzone / 2;    // 10% of range
                 
-                if (scaled < 0) scaled = 0;
-                if (scaled > 255) scaled = 255;
+                int32_t scaled;
                 
+                // Bottom deadzone (near rest position)
+                if (current_value >= (rest_value - bottom_deadzone)) {
+                    scaled = 0; // Trigger at rest
+                }
+                // Top deadzone (fully pressed)
+                else if (current_value <= (pressed_value + top_deadzone)) {
+                    scaled = 255; // Trigger fully pressed
+                }
+                else {
+                    // Active range between deadzones
+                    int32_t active_rest = rest_value - bottom_deadzone;
+                    int32_t active_pressed = pressed_value + top_deadzone;
+                    int32_t active_range = active_rest - active_pressed;
+
+                    // Map from active range to 0-255
+                    scaled = ((active_rest - current_value) * 255) / active_range;
+
+                    // Clamp to valid range
+                    if (scaled < 0) scaled = 0;
+                    if (scaled > 255) scaled = 255;
+                }
+
                 data->controller_value.trigger_value = (uint8_t)scaled;
-                data->in_deadzone = false;
+                data->in_deadzone = (scaled == 0);
             } else {
-                // Stick scaling with deadzone
+                // Stick scaling without per-axis deadzone (will apply square deadzone later)
                 int16_t offset_from_center = calibrated_value - cal->center_value;
+                int32_t scaled = 0;
                 
-                // Invert Y axis
-                if (i == ANALOG_CHANNEL_STICK_Y) {
-                    offset_from_center = -offset_from_center;
-                }
-                
-                if (abs(offset_from_center) <= cal->deadzone) {
-                    data->controller_value.stick_value = 0;
-                    data->in_deadzone = true;
-                } else {
-                    int32_t scaled = 0;
-                    
-                    if (offset_from_center > 0) {
-                        int32_t range = cal->max_value - (cal->center_value + cal->deadzone);
-                        int32_t offset_value = offset_from_center - cal->deadzone;
-                        if (range > 0) {
-                            scaled = (offset_value * 127) / range;
-                        }
-                        if (scaled > 127) scaled = 127;
-                        if (scaled < 0) scaled = 0;
-                    } else {
-                        int32_t range = (cal->center_value - cal->deadzone) - cal->min_value;
-                        int32_t offset_value = abs(offset_from_center) - cal->deadzone;
-                        if (range > 0) {
-                            scaled = -((offset_value * 127) / range);
-                        }
-                        if (scaled < -127) scaled = -127;
-                        if (scaled > 0) scaled = 0;
+                if (offset_from_center > 0) {
+                    // Positive direction - with 5% outer deadzone
+                    int32_t total_range = cal->max_value - (cal->center_value + cal->deadzone);
+                    int32_t outer_deadzone = total_range * 0.05f;
+                    int32_t range = total_range - outer_deadzone;
+                    int32_t offset_value = offset_from_center - cal->deadzone;
+                    if (range > 0) {
+                        scaled = (offset_value * 127) / range;
                     }
-                    
-                    data->controller_value.stick_value = (int8_t)scaled;
-                    data->in_deadzone = false;
+                    if (scaled > 127) scaled = 127;
+                    if (scaled < 0) scaled = 0;
+                } else {
+                    // Negative direction - with 5% outer deadzone
+                    int32_t total_range = (cal->center_value - cal->deadzone) - cal->min_value;
+                    int32_t outer_deadzone = total_range * 0.05f;
+                    int32_t range = total_range - outer_deadzone;
+                    int32_t offset_value = abs(offset_from_center) - cal->deadzone;
+                    if (range > 0) {
+                        scaled = -((offset_value * 127) / range);
+                    }
+                    if (scaled < -127) scaled = -127;
+                    if (scaled > 0) scaled = 0;
                 }
+                
+                // Invert Y axis AFTER scaling
+                if (i == ANALOG_CHANNEL_STICK_Y) {
+                    scaled = -scaled;
+                }
+                
+                data->controller_value.stick_value = (int8_t)scaled;
+                data->in_deadzone = false;
             }
             
             k_mutex_unlock(&g_analog_ctx.data_mutex);
@@ -1054,3 +1128,230 @@ analog_status_t analog_driver_full_calibration(uint32_t delay_ms)
     LOG_INF("=== FULL CALIBRATION COMPLETE ===");
     return ANALOG_STATUS_OK;
 }
+
+// Interactive calibration tracking variables
+static struct {
+    bool collecting;
+    int16_t stick_x_min;
+    int16_t stick_x_max;
+    int16_t stick_y_min;
+    int16_t stick_y_max;
+    int32_t stick_x_center_sum;
+    int32_t stick_y_center_sum;
+    int16_t trigger_min;
+    int16_t trigger_max;
+    uint32_t center_samples;
+    uint32_t total_samples;
+} calibration_state = {0};
+
+/**
+ * @brief Begin calibration data collection (resets min/max tracking)
+ */
+analog_status_t analog_driver_begin_calibration_collection(void)
+{
+    if (!g_analog_ctx.initialized)
+    {
+        return ANALOG_STATUS_NOT_INITIALIZED;
+    }
+
+    LOG_INF("=== STARTING INTERACTIVE CALIBRATION ===");
+    LOG_INF("Step 1: Keep stick centered for 2 seconds...");
+
+    // Disable existing calibration on all channels so we get true raw values
+    g_analog_ctx.calibrations[ANALOG_CHANNEL_STICK_X].is_calibrated = false;
+    g_analog_ctx.calibrations[ANALOG_CHANNEL_STICK_Y].is_calibrated = false;
+    g_analog_ctx.calibrations[ANALOG_CHANNEL_TRIGGER].is_calibrated = false;
+
+    // Reset calibration state
+    calibration_state.collecting = true;
+    calibration_state.stick_x_min = 4095;
+    calibration_state.stick_x_max = 0;
+    calibration_state.stick_y_min = 4095;
+    calibration_state.stick_y_max = 0;
+    calibration_state.stick_x_center_sum = 0;
+    calibration_state.stick_y_center_sum = 0;
+    calibration_state.trigger_min = 4095;
+    calibration_state.trigger_max = 0;
+    calibration_state.center_samples = 0;
+    calibration_state.total_samples = 0;
+
+    return ANALOG_STATUS_OK;
+}
+
+/**
+ * @brief Update calibration with current analog values (call repeatedly during movement)
+ */
+analog_status_t analog_driver_update_calibration_data(void)
+{
+    if (!g_analog_ctx.initialized)
+    {
+        return ANALOG_STATUS_NOT_INITIALIZED;
+    }
+
+    if (!calibration_state.collecting)
+    {
+        return ANALOG_STATUS_ERROR;
+    }
+
+    // Get current raw values
+    int16_t stick_x = g_analog_ctx.channel_data[ANALOG_CHANNEL_STICK_X].raw_value;
+    int16_t stick_y = g_analog_ctx.channel_data[ANALOG_CHANNEL_STICK_Y].raw_value;
+    int16_t trigger = g_analog_ctx.channel_data[ANALOG_CHANNEL_TRIGGER].raw_value;
+
+    // Collect center position for first 100 samples (first ~2 seconds at 50Hz)
+    if (calibration_state.center_samples < 100)
+    {
+        calibration_state.stick_x_center_sum += stick_x;
+        calibration_state.stick_y_center_sum += stick_y;
+        calibration_state.center_samples++;
+    }
+
+    // Track min/max values
+    if (stick_x < calibration_state.stick_x_min) calibration_state.stick_x_min = stick_x;
+    if (stick_x > calibration_state.stick_x_max) calibration_state.stick_x_max = stick_x;
+    if (stick_y < calibration_state.stick_y_min) calibration_state.stick_y_min = stick_y;
+    if (stick_y > calibration_state.stick_y_max) calibration_state.stick_y_max = stick_y;
+    if (trigger < calibration_state.trigger_min) calibration_state.trigger_min = trigger;
+    if (trigger > calibration_state.trigger_max) calibration_state.trigger_max = trigger;
+
+    calibration_state.total_samples++;
+
+    // Log progress every 50 samples (~1 second at 50Hz)
+    if (calibration_state.total_samples % 50 == 0)
+    {
+        LOG_INF("Calibration progress: %d samples collected", calibration_state.total_samples);
+        LOG_INF("  Stick X: min=%d, max=%d", calibration_state.stick_x_min, calibration_state.stick_x_max);
+        LOG_INF("  Stick Y: min=%d, max=%d", calibration_state.stick_y_min, calibration_state.stick_y_max);
+        LOG_INF("  Trigger: min=%d, max=%d", calibration_state.trigger_min, calibration_state.trigger_max);
+    }
+
+    return ANALOG_STATUS_OK;
+}
+
+/**
+ * @brief Finalize calibration and apply the collected min/max values
+ */
+analog_status_t analog_driver_finalize_calibration(void)
+{
+    if (!g_analog_ctx.initialized)
+    {
+        return ANALOG_STATUS_NOT_INITIALIZED;
+    }
+
+    if (!calibration_state.collecting)
+    {
+        return ANALOG_STATUS_ERROR;
+    }
+
+    calibration_state.collecting = false;
+
+    // Calculate center position from first 100 samples
+    int16_t stick_x_center = calibration_state.stick_x_center_sum / calibration_state.center_samples;
+    int16_t stick_y_center = calibration_state.stick_y_center_sum / calibration_state.center_samples;
+
+    // Apply calibration with deadzone (5% of range for sticks - more noticeable)
+    int16_t stick_x_range = calibration_state.stick_x_max - calibration_state.stick_x_min;
+    int16_t stick_y_range = calibration_state.stick_y_max - calibration_state.stick_y_min;
+    int16_t stick_x_deadzone = stick_x_range * 0.05f;
+    int16_t stick_y_deadzone = stick_y_range * 0.05f;
+
+    analog_driver_calibrate_channel(ANALOG_CHANNEL_STICK_X,
+                                   stick_x_center,
+                                   calibration_state.stick_x_min,
+                                   calibration_state.stick_x_max,
+                                   stick_x_deadzone);
+
+    analog_driver_calibrate_channel(ANALOG_CHANNEL_STICK_Y,
+                                   stick_y_center,
+                                   calibration_state.stick_y_min,
+                                   calibration_state.stick_y_max,
+                                   stick_y_deadzone);
+
+    // Trigger uses larger deadzone at rest position (20% of range - prevents accidental activation)
+    int16_t trigger_range = calibration_state.trigger_max - calibration_state.trigger_min;
+    int16_t trigger_deadzone = trigger_range * 0.20f;
+    if (trigger_deadzone < 150) trigger_deadzone = 150;  // Minimum 150 unit deadzone
+    
+    analog_driver_calibrate_channel(ANALOG_CHANNEL_TRIGGER,
+                                   calibration_state.trigger_min,
+                                   calibration_state.trigger_min,
+                                   calibration_state.trigger_max,
+                                   trigger_deadzone);
+
+    LOG_INF("=== INTERACTIVE CALIBRATION COMPLETE ===");
+    LOG_INF("Stick X: center=%d, min=%d, max=%d, deadzone=%d",
+            stick_x_center, calibration_state.stick_x_min, calibration_state.stick_x_max, stick_x_deadzone);
+    LOG_INF("Stick Y: center=%d, min=%d, max=%d, deadzone=%d",
+            stick_y_center, calibration_state.stick_y_min, calibration_state.stick_y_max, stick_y_deadzone);
+    LOG_INF("Trigger: min=%d, max=%d",
+            calibration_state.trigger_min, calibration_state.trigger_max);
+    LOG_INF("Total samples collected: %d", calibration_state.total_samples);
+
+    return ANALOG_STATUS_OK;
+}
+
+/**
+ * @brief Start interactive calibration mode (move stick in circles, pull trigger)
+ */
+analog_status_t analog_driver_interactive_calibration(uint32_t duration_ms)
+{
+    LOG_INF("=== INTERACTIVE CALIBRATION MODE ===");
+    LOG_INF("Duration: %d seconds", duration_ms / 1000);
+    LOG_INF("");
+    LOG_INF("Instructions:");
+    LOG_INF("1. First 2 seconds: Keep stick centered, trigger released");
+    LOG_INF("2. Next %d seconds: Move stick in full circles", (duration_ms - 2000) / 1000);
+    LOG_INF("3. During movement: Pull and release trigger fully");
+    LOG_INF("");
+    LOG_INF("Starting in 3 seconds...");
+
+    k_sleep(K_MSEC(3000));
+
+    // Begin collection
+    analog_status_t status = analog_driver_begin_calibration_collection();
+    if (status != ANALOG_STATUS_OK)
+    {
+        LOG_ERR("Failed to begin calibration collection");
+        return status;
+    }
+
+    LOG_INF(">>> CENTER STICK NOW - hold for 2 seconds <<<");
+
+    // Collect data for specified duration
+    uint32_t start_time = k_uptime_get_32();
+    uint32_t last_instruction = start_time;
+    bool gave_movement_instruction = false;
+
+    while ((k_uptime_get_32() - start_time) < duration_ms)
+    {
+        // Give movement instruction after 2 seconds
+        if (!gave_movement_instruction && (k_uptime_get_32() - start_time) >= 2000)
+        {
+            LOG_INF(">>> MOVE STICK IN CIRCLES & PULL TRIGGER <<<");
+            gave_movement_instruction = true;
+        }
+
+        // Update calibration with current values
+        status = analog_driver_update_calibration_data();
+        if (status != ANALOG_STATUS_OK)
+        {
+            LOG_ERR("Failed to update calibration data");
+            return status;
+        }
+
+        k_sleep(K_MSEC(20));  // 50Hz sampling
+    }
+
+    LOG_INF(">>> CALIBRATION DATA COLLECTION COMPLETE <<<");
+
+    // Finalize calibration
+    status = analog_driver_finalize_calibration();
+    if (status != ANALOG_STATUS_OK)
+    {
+        LOG_ERR("Failed to finalize calibration");
+        return status;
+    }
+
+    return ANALOG_STATUS_OK;
+}
+

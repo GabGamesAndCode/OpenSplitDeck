@@ -12,7 +12,7 @@
 
 #include "controller_storage.h"
 
-LOG_MODULE_REGISTER(storage, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(storage, LOG_LEVEL_ERR);
 
 // Storage is ready flag
 static bool storage_initialized = false;

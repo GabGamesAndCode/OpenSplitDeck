@@ -201,6 +201,14 @@ void display_show_status_screen_with_battery(uint16_t battery_mv);
 void display_show_analog_screen(int16_t stick_x, int16_t stick_y, uint8_t trigger);
 
 /**
+ * @brief Display calibration screen with progress
+ * 
+ * @param phase Calibration phase: 0=centering, 1=movement
+ * @param progress Progress percentage (0-100)
+ */
+void display_show_calibration_screen(uint8_t phase, uint8_t progress);
+
+/**
  * @brief Display menu screen
  */
 void display_show_menu(uint8_t selected_item);
@@ -212,6 +220,7 @@ typedef enum {
     DISPLAY_SCREEN_STATUS = 0,
     DISPLAY_SCREEN_ANALOG,
     DISPLAY_SCREEN_MENU,
+    DISPLAY_SCREEN_CALIBRATION,
     DISPLAY_SCREEN_CUSTOM
 } display_screen_type_t;
 

@@ -23,7 +23,12 @@ static uint32_t last_packet_time = 0;
 static uint8_t sequence_counter = 0;
 static uint32_t last_tx_time[2] = {0, 0};  // Separate timing for each controller: [0]=right, [1]=left
 static uint32_t last_any_rx_time = 0;      // Track most recent packet from ANY controller for collision detection
-static const uint16_t BASE_INTERVAL_MS = 4;  // 4ms intervals for stable performance
+static const uint16_t BASE_INTERVAL_MS = 4;  // 4ms intervals for low latency (250Hz per controller)
+static bool right_phase_toggle = false;     // Toggles RIGHT controller between 2ms and 6ms to maintain 2ms offset from LEFT
+
+// Haptics state
+static uint8_t left_rumble_amplitude = 0;
+static uint8_t right_rumble_amplitude = 0;
 
 // ESB event handler for ACK-based reception
 static void simple_esb_event_handler(struct esb_evt const *event)
@@ -100,40 +105,32 @@ static void simple_esb_event_handler(struct esb_evt const *event)
                             time_diff, is_left ? "LEFT" : "RIGHT");
                 }
 
-                // Create ACK payload with timing control + rumble (lean 8-byte design)
+                // Create ACK payload with timing control + rumble (8-byte design)
                 ack_timing_data_t ack_data = {
                     .next_delay_ms = 0,        // Will calculate below
                     .sequence_num = sequence_counter++,
-                    .rumble_data = 0x00,       // No rumble for now: left=0, right=0 
-                    .dongle_timestamp = current_time
+                    .left_rumble = left_rumble_amplitude,   // S-Input haptics (0-255)
+                    .right_rumble = right_rumble_amplitude, // S-Input haptics (0-255)
+                    .reserved = 0,
+                    .dongle_timestamp = (uint16_t)(current_time & 0xFFFF) // Truncated timestamp
                 };
                 
-                // Staggered timing to prevent packet collisions
-                // Both controllers use the same base interval
-                uint32_t base_delay = BASE_INTERVAL_MS;  // 4ms for both
+                // Simple fixed staggering: LEFT=4ms, RIGHT=3ms
+                // This creates natural offset without complex logic
+                // LEFT: 4ms intervals (0, 4, 8, 12, 16, 20, 24ms...) = 250 Hz
+                // RIGHT: 3ms intervals (0, 3, 6, 9, 12, 15, 18ms...) = 333 Hz
+                // Pattern: Both sync every 12ms, offset in between
                 
-                // Dynamic collision avoidance - ensure minimum 2ms gap between transmissions
-                // Calculate how much padding is needed to achieve 2ms separation
-                uint32_t padding = 0;
-                const uint32_t MIN_GAP_MS = 2; // Minimum desired gap between controller packets
+                uint32_t delay_ms = is_left ? 4 : 3;
                 
-                if (gap_since_any > 0 && gap_since_any < MIN_GAP_MS) {
-                    // Too close! Add padding to push this controller's next transmission out
-                    // so it doesn't collide with the other controller's next transmission
-                    padding = MIN_GAP_MS - gap_since_any;
-                    LOG_WRN("COLLISION DETECTED: %s controller gap=%dms (target=%dms), adding %dms padding", 
-                            is_left ? "LEFT" : "RIGHT", gap_since_any, MIN_GAP_MS, padding);
-                }
+                // Set the delay
+                ack_data.next_delay_ms = delay_ms;
                 
-                // Set the delay: base interval + dynamic padding to maintain 2ms separation
-                ack_data.next_delay_ms = base_delay + padding;
-                
-                // Log what timing we're actually sending to controllers - every 10th packet to reduce spam
-                static uint32_t log_counter = 0;
-                if (++log_counter % 10 == 0) {
-                    uint32_t time_since_last = (last_tx_time[controller_id] == 0) ? 0 : (current_time - last_tx_time[controller_id]);
-                    LOG_WRN("%s controller: base=%dms, since_last=%dms, sending_delay=%dms, padding=%dms",
-                            is_left ? "LEFT" : "RIGHT", base_delay, time_since_last, ack_data.next_delay_ms, padding);
+                // Log fixed stagger pattern once
+                static bool logged_stagger = false;
+                if (!logged_stagger) {
+                    LOG_INF("FIXED STAGGER: LEFT=4ms (250Hz), RIGHT=3ms (333Hz)");
+                    logged_stagger = true;
                 }
                 
                 // Update last transmission time tracking (per-controller)
@@ -152,13 +149,6 @@ static void simple_esb_event_handler(struct esb_evt const *event)
                 int result = esb_write_payload(&ack_tx_payload);
                 if (result != 0) {
                     LOG_WRN("Failed to queue ACK payload: %d", result);
-                } else {
-                    // DEBUG: Let's verify we're actually sending ACK payloads
-                    static uint32_t ack_counter = 0;
-                    if (++ack_counter % 20 == 0) {
-                        LOG_INF("ACK payload sent: delay=%dms, pipe=%d, seq=%d", 
-                               ack_data.next_delay_ms, rx_payload.pipe, ack_data.sequence_num);
-                    }
                 }
 
                 gpio_pin_set_dt(&led0, 1);
@@ -192,11 +182,7 @@ static void simple_esb_event_handler(struct esb_evt const *event)
         break;
 
     case ESB_EVENT_TX_SUCCESS:
-        // Every 50th ACK transmission, log success to verify ACK payloads are going out
-        static uint32_t ack_tx_counter = 0;
-        if (++ack_tx_counter % 50 == 0) {
-            LOG_INF("ACK payloads being transmitted successfully (count: %d)", ack_tx_counter);
-        }
+        // ACK payloads transmitted successfully
         break;
 
     case ESB_EVENT_TX_FAILED:
@@ -246,7 +232,6 @@ int clocks_start(void)
         }
     } while (err);
 
-    LOG_INF("HF clock started");
     return 0;
 }
 
@@ -254,8 +239,6 @@ int clocks_start(void)
 int controller_esb_init(void)
 {
     int err;
-
-    LOG_INF("Dongle ESB initialization starting...");
 
     // Start clocks first (like Nordic reference)
     err = clocks_start();
@@ -318,7 +301,8 @@ int controller_esb_init(void)
         return err;
     }
 
-    // Set RF channel
+    // Set RF channel - using 2450 MHz (channel 50) to avoid WiFi interference
+    // This sits between WiFi channels 8 and 9, reducing interference
     err = esb_set_rf_channel(50);
     if (err)
     {
@@ -334,8 +318,6 @@ int controller_esb_init(void)
         return err;
     }
 
-    LOG_INF("ESB configuration complete");
-
     // Write initial payload (like Nordic PRX reference does)
     struct esb_payload tx_payload = {0};
     tx_payload.length = 8;
@@ -350,8 +332,6 @@ int controller_esb_init(void)
         return err;
     }
 
-    LOG_INF("Setting up for packet reception");
-
     // Start receiving (like Nordic reference)
     err = esb_start_rx();
     if (err)
@@ -360,7 +340,6 @@ int controller_esb_init(void)
         return err;
     }
 
-    LOG_INF("ESB initialized for ACK-based communication - listening for controller data");
     return 0;
 }
 
@@ -393,4 +372,20 @@ bool controller_esb_has_new_data(void)
     bool right_has_data = right_controller_state.data_received &&
                          (now - right_controller_state.last_ping_time) < 100;
     return left_has_data || right_has_data;
+}
+
+// Set haptics/rumble values (called from USB HID haptics callback)
+void controller_esb_set_haptics(uint8_t left_amplitude, uint8_t right_amplitude)
+{
+    left_rumble_amplitude = left_amplitude;
+    right_rumble_amplitude = right_amplitude;
+    
+    // Log haptics changes for debugging
+    static uint8_t last_left = 0, last_right = 0;
+    if (left_amplitude != last_left || right_amplitude != last_right)
+    {
+        LOG_INF("Haptics set: L=%u, R=%u", left_amplitude, right_amplitude);
+        last_left = left_amplitude;
+        last_right = right_amplitude;
+    }
 }

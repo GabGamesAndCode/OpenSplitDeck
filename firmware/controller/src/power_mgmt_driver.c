@@ -16,7 +16,7 @@
 #include <zephyr/sys/poweroff.h>
 #include "power_mgmt_driver.h"
 
-LOG_MODULE_REGISTER(power_mgmt, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(power_mgmt, LOG_LEVEL_ERR);
 
 // Power management context
 typedef struct

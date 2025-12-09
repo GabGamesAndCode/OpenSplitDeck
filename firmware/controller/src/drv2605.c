@@ -12,7 +12,7 @@
 
 #include "drv2605.h"
 
-LOG_MODULE_REGISTER(drv2605, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(drv2605, LOG_LEVEL_ERR);
 
 // Private function prototypes
 static int drv2605_write_reg(const drv2605_device_t *dev, uint8_t reg, uint8_t value);

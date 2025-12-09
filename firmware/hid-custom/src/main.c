@@ -37,6 +37,20 @@ static void process_controller_data(const struct device *hid_dev)
     static uint8_t left_x = 128, left_y = 128;
     static uint8_t right_x = 128, right_y = 128;
     static uint8_t left_trigger = 0, right_trigger = 0;
+    
+    // 4-point rolling average buffers for stick smoothing
+    static int16_t left_x_buffer[4] = {128, 128, 128, 128};
+    static int16_t left_y_buffer[4] = {128, 128, 128, 128};
+    static int16_t right_x_buffer[4] = {128, 128, 128, 128};
+    static int16_t right_y_buffer[4] = {128, 128, 128, 128};
+    static uint8_t stick_buffer_idx = 0;
+    
+    // Exponential smoothing for additional noise reduction
+    static float left_x_smooth = 128.0f;
+    static float left_y_smooth = 128.0f;
+    static float right_x_smooth = 128.0f;
+    static float right_y_smooth = 128.0f;
+    static const float alpha = 0.5f; // Smoothing factor (0.5 = balanced noise reduction with good responsiveness)
     static bool touch1_active = false;
     static bool touch2_active = false;
     static uint16_t touch1_x = 0, touch1_y = 0;
@@ -61,9 +75,17 @@ static void process_controller_data(const struct device *hid_dev)
     // Process LEFT controller data independently
     if (left_controller->data_received)
     {
-        // Left controller data
-        left_x = (uint8_t)(left_controller->stickX + 128);
-        left_y = (uint8_t)(left_controller->stickY + 128);
+        // Left controller data with 4-point rolling average
+        left_x_buffer[stick_buffer_idx] = left_controller->stickX + 128;
+        left_y_buffer[stick_buffer_idx] = left_controller->stickY + 128;
+        int16_t left_x_avg = (left_x_buffer[0] + left_x_buffer[1] + left_x_buffer[2] + left_x_buffer[3]) / 4;
+        int16_t left_y_avg = (left_y_buffer[0] + left_y_buffer[1] + left_y_buffer[2] + left_y_buffer[3]) / 4;
+        
+        // Apply exponential smoothing: output = alpha * new_value + (1 - alpha) * old_value
+        left_x_smooth = alpha * left_x_avg + (1.0f - alpha) * left_x_smooth;
+        left_y_smooth = alpha * left_y_avg + (1.0f - alpha) * left_y_smooth;
+        left_x = (uint8_t)(left_x_smooth + 0.5f); // Round to nearest
+        left_y = (uint8_t)(left_y_smooth + 0.5f);
         left_trigger = left_controller->trigger;
 
         // Touchpad from left controller
@@ -163,9 +185,17 @@ static void process_controller_data(const struct device *hid_dev)
     // Process RIGHT controller data independently
     if (right_controller->data_received)
     {
-        // Right controller data
-        right_x = (uint8_t)(right_controller->stickX + 128);
-        right_y = (uint8_t)(right_controller->stickY + 128);
+        // Right controller data with 4-point rolling average
+        right_x_buffer[stick_buffer_idx] = right_controller->stickX + 128;
+        right_y_buffer[stick_buffer_idx] = right_controller->stickY + 128;
+        int16_t right_x_avg = (right_x_buffer[0] + right_x_buffer[1] + right_x_buffer[2] + right_x_buffer[3]) / 4;
+        int16_t right_y_avg = (right_y_buffer[0] + right_y_buffer[1] + right_y_buffer[2] + right_y_buffer[3]) / 4;
+        
+        // Apply exponential smoothing: output = alpha * new_value + (1 - alpha) * old_value
+        right_x_smooth = alpha * right_x_avg + (1.0f - alpha) * right_x_smooth;
+        right_y_smooth = alpha * right_y_avg + (1.0f - alpha) * right_y_smooth;
+        right_x = (uint8_t)(right_x_smooth + 0.5f); // Round to nearest
+        right_y = (uint8_t)(right_y_smooth + 0.5f);
         right_trigger = right_controller->trigger;
 
         // IMU from right controller only
@@ -319,6 +349,9 @@ static void process_controller_data(const struct device *hid_dev)
     last_touch2_y = touch2_y;
     last_touch2_active = touch2_active;
     // With interp(end)
+    
+    // Update stick buffer index for rolling average (circular buffer)
+    stick_buffer_idx = (stick_buffer_idx + 1) % 4;
 
     // Send the report (same as before)
     usb_hid_send_ds4_report_with_touchpad_and_imu(hid_dev, dpad, buttons1, buttons2,

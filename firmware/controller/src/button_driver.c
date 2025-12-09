@@ -12,7 +12,7 @@
 #include "haptic_driver.h" // For haptic feedback
 #include <zephyr/logging/log.h>
 
-LOG_MODULE_REGISTER(button_driver, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(button_driver, LOG_LEVEL_ERR);
 
 // Global context
 static button_driver_context_t g_button_ctx = {0};

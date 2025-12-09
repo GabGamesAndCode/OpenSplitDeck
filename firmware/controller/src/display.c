@@ -6,7 +6,7 @@
 #include "display.h"
 #include "ui_Images.h"
 
-LOG_MODULE_REGISTER(display_lib, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(display_lib, LOG_LEVEL_ERR);
 
 // Display device
 static const struct device *display_dev = NULL;
@@ -510,5 +510,44 @@ void display_show_status_screen(void)
     display_draw_bitmap(96, 0, 32, 32, bitmap_battery_sym);
     
     // Write to display only once
+    display_refresh_screen();
+}
+
+/**
+ * @brief Display calibration screen with progress
+ */
+void display_show_calibration_screen(uint8_t phase, uint8_t progress)
+{
+    display_clear();
+    
+    // Draw title "CAL" at top center
+    display_draw_letter('C', 50, 2);
+    display_draw_letter('A', 55, 2);
+    display_draw_letter('L', 60, 2);
+    
+    // Draw phase message
+    if (phase == 0) {
+        // Centering phase "CENTER"
+        display_draw_letter('C', 30, 12);
+        display_draw_letter('E', 35, 12);
+        display_draw_letter('N', 40, 12);
+        display_draw_letter('T', 45, 12);
+        display_draw_letter('E', 50, 12);
+        display_draw_letter('R', 55, 12);
+    } else {
+        // Movement phase "MOVE"
+        display_draw_letter('M', 38, 12);
+        display_draw_letter('O', 43, 12);
+        display_draw_letter('V', 48, 12);
+        display_draw_letter('E', 53, 12);
+    }
+    
+    // Draw progress bar
+    int16_t bar_width = (progress * 100) / 100;  // Scale to 100 pixels wide
+    display_draw_rect(14, 24, 100, 6, false);  // Border
+    if (bar_width > 0) {
+        display_draw_rect(15, 25, bar_width, 4, true);  // Fill
+    }
+    
     display_refresh_screen();
 }

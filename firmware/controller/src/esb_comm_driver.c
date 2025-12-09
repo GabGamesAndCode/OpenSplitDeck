@@ -15,7 +15,7 @@
 #include <esb.h>
 #include "esb_comm_driver.h"
 
-LOG_MODULE_REGISTER(esb_comm, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(esb_comm, LOG_LEVEL_ERR);
 
 // ESB communication context
 typedef struct
@@ -118,11 +118,10 @@ static void esb_comm_event_handler(struct esb_evt const *event)
             g_esb_ctx.current_rumble_left = (g_esb_ctx.last_ack_data.rumble_data >> 4) & 0x0F;
             g_esb_ctx.current_rumble_right = g_esb_ctx.last_ack_data.rumble_data & 0x0F;
 
-            // Log ACK payload data (occasionally, to avoid spam)
+            // Log ACK payload data occasionally
             static uint32_t last_ack_log = 0;
             uint32_t now = k_uptime_get_32();
-            if ((now - last_ack_log) > 5000)
-            { // Log every 5 seconds
+            if ((now - last_ack_log) > 5000) {
                 LOG_INF("ACK payload: delay=%dms, seq=%d, rumble=L%d/R%d, dongle_time=%u",
                         g_esb_ctx.last_ack_data.next_delay_ms,
                         g_esb_ctx.last_ack_data.sequence_num,
@@ -686,5 +685,5 @@ uint32_t esb_comm_get_dongle_timestamp(void)
  */
 uint16_t esb_comm_get_next_delay(void)
 {
-    return g_esb_ctx.last_ack_data.next_delay_ms;
+    return g_esb_ctx.next_tx_delay_ms;
 }

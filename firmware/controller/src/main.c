@@ -1,4 +1,4 @@
-/*
+  /*
  * Dual Controller System - Zephyr ESB Implementation
  *
  * This code runs on a Seeed Xiao BLE nRF52840 Sense Plus
@@ -59,6 +59,8 @@ static const struct gpio_dt_spec led0 = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 // Display State Varibles
 static display_screen_type_t current_display_screen = DISPLAY_SCREEN_STATUS;
 static display_analog_data_t display_analog_data = {0};
+static uint8_t calibration_phase = 0;      // 0=centering, 1=movement
+static uint8_t calibration_progress = 0;   // 0-100%
 // REMOVED display_mutex - was causing priority inversion and 100-160ms thread delays
 // Main thread (200Hz) calling display_set_screen competed with display thread (20Hz)
 
@@ -215,7 +217,7 @@ void esb_comm_init(void)
             .controller_id = CONTROLLER_ID,
             .base_tx_interval_ms = base_interval,
             .retry_interval_ms = retry_interval,
-            .rf_channel = 1,    // RF channel 1
+            .rf_channel = 50,   // RF channel 50 (2450 MHz) - MUST match dongle
             .status_led = &led0 // Use LED0 for status indication
         };
 
@@ -429,8 +431,8 @@ bool init_trackpad_arduino_hybrid(void)
 
         // Run the full Arduino initialization sequence
         uint32_t init_start = k_uptime_get_32();
-        while (!trackpad_arduino_initialized && (k_uptime_get_32() - init_start) < 30000)
-        { // 30 second timeout
+        while (!trackpad_arduino_initialized && (k_uptime_get_32() - init_start) < 5000)
+        { // 5 second timeout (reduced from 30s to prevent long freezes)
                 iqs7211e_run(&trackpad_instance);
 
                 // Check if initialization is complete
@@ -829,8 +831,8 @@ bool init_trackpad_enhanced(void)
         uint32_t ati_start = k_uptime_get_32();
         bool ati_done = false;
 
-        while ((k_uptime_get_32() - ati_start) < 10000)
-        { // 10 second timeout
+        while ((k_uptime_get_32() - ati_start) < 3000)
+        { // 3 second timeout (reduced from 10s to prevent long freezes)
                 uint8_t info_flags[2];
                 ret = i2c_write_read(i2c_dev, 0x56, "\x0F", 1, info_flags, 2);
                 if (ret == 0)
@@ -850,9 +852,9 @@ bool init_trackpad_enhanced(void)
                 LOG_WRN("ATI timeout, but continuing anyway");
         }
 
-        // 9. Set event mode (CORRECT address)
-        LOG_INF("Setting event mode...");
-        WRITE_SINGLE(0x53, CONFIG_SETTINGS1 | 0x01, "EVENT_MODE");
+        // 9. Set STREAMING mode instead of event mode for continuous data
+        LOG_INF("Setting streaming mode (disable event mode)...");
+        WRITE_SINGLE(0x53, CONFIG_SETTINGS1 & ~0x01, "STREAMING_MODE"); // Clear EVENT_MODE_BIT
         k_sleep(K_MSEC(100));
 
 #undef WRITE_SINGLE
@@ -871,6 +873,19 @@ void trackpad_rdy_interrupt_handler(const struct device *dev, struct gpio_callba
         ARG_UNUSED(dev);
         ARG_UNUSED(cb);
         ARG_UNUSED(pins);
+
+        static uint32_t interrupt_count = 0;
+        static uint32_t last_log = 0;
+        
+        interrupt_count++;
+        
+        // Log interrupt rate every second
+        uint32_t now = k_uptime_get_32();
+        if ((now - last_log) >= 1000) {
+                printk("Trackpad RDY interrupts: %u/sec\n", interrupt_count);
+                interrupt_count = 0;
+                last_log = now;
+        }
 
         // Signal the trackpad thread that data is ready
         k_sem_give(&trackpad_rdy_sem);
@@ -896,8 +911,8 @@ void check_trackpad_haptic_feedback(uint16_t new_x, uint16_t new_y)
         int16_t x_diff = abs((int16_t)new_x - (int16_t)last_x);
         int16_t y_diff = abs((int16_t)new_y - (int16_t)last_y);
 
-        // Check if movement exceeds threshold (60 units in either direction)
-        if (x_diff >= 60 || y_diff >= 60)
+        // Check if movement exceeds threshold (120 units in either direction)
+        if (x_diff >= 120 || y_diff >= 120)
         {
                 if (!haptic_pulse_active)
                 {
@@ -932,7 +947,7 @@ void trackpad_thread_entry(void *p1, void *p2, void *p3)
         ARG_UNUSED(p3);
 
         // Wait for system to boot up and I2C to stabilize
-        k_sleep(K_MSEC(3000));
+        k_sleep(K_MSEC(500));  // Reduced from 3000ms to 500ms - I2C is ready much faster
 
         // Use Arduino library for initialization
         if (!init_trackpad_arduino_hybrid())
@@ -967,16 +982,16 @@ void trackpad_thread_entry(void *p1, void *p2, void *p3)
                 goto polling_mode;
         }
 
-        // Enable interrupt - TRY FALLING EDGE instead
-        LOG_INF("Trying FALLING EDGE interrupt (data ready when RDY goes LOW)...");
-        ret = gpio_pin_interrupt_configure_dt(&trackpad_rdy, GPIO_INT_EDGE_FALLING);
+        // Enable interrupt - Use EDGE_RISING for streaming mode (RDY pulses HIGH when data ready)
+        LOG_INF("Configuring RISING EDGE interrupt for streaming mode...");
+        ret = gpio_pin_interrupt_configure_dt(&trackpad_rdy, GPIO_INT_EDGE_RISING);
         if (ret != 0)
         {
                 LOG_ERR("Failed to configure RDY interrupt: %d", ret);
                 goto polling_mode;
         }
 
-        LOG_INF("RDY pin interrupt configured - using interrupt-based trackpad reading");
+        LOG_INF("RDY pin interrupt configured - streaming mode active (continuous data)");
 
         // Interrupt-based reading loop
         while (1)
@@ -996,9 +1011,13 @@ void trackpad_thread_entry(void *p1, void *p2, void *p3)
 
                         if (read_trackpad_coordinates_simple(&x, &y))
                         {
+                                // DEBUG: Always log the raw trackpad values
+                                LOG_INF("TRACKPAD RAW: X=%u (0x%04X), Y=%u (0x%04X)", x, x, y, y);
+                                
                                 // Check for valid coordinates
                                 if (x != 0xFFFF && y != 0xFFFF && (x != 0 || y != 0))
                                 {
+                                        LOG_INF("  -> VALID: Setting controller padX=%u, padY=%u", x, y);
                                         // Check for haptic feedback before updating controller data
                                         check_trackpad_haptic_feedback(x, y);
 
@@ -1007,12 +1026,14 @@ void trackpad_thread_entry(void *p1, void *p2, void *p3)
                                 }
                                 else
                                 {
+                                        LOG_INF("  -> INVALID: Clearing to 0,0");
                                         controller_data.padX = 0;
                                         controller_data.padY = 0;
                                 }
                         }
                         else
                         {
+                                LOG_ERR("  -> I2C READ FAILED");
                                 // I2C read failed - set coordinates to 0
                                 controller_data.padX = 0;
                                 controller_data.padY = 0;
@@ -1020,6 +1041,7 @@ void trackpad_thread_entry(void *p1, void *p2, void *p3)
                 }
                 else
                 {
+                        LOG_DBG("TRACKPAD: Timeout (no interrupt)");
                         // Timeout - no interrupt in 100ms, consider no touch
                         controller_data.padX = 0;
                         controller_data.padY = 0;
@@ -1108,6 +1130,10 @@ void display_thread_entry(void *p1, void *p2, void *p3)
 
                 case DISPLAY_SCREEN_MENU:
                         // Add menu screen here
+                        break;
+
+                case DISPLAY_SCREEN_CALIBRATION:
+                        display_show_calibration_screen(calibration_phase, calibration_progress);
                         break;
 
                 default:
@@ -1228,8 +1254,8 @@ void read_button_inputs(void)
                 static bool last_pad_click_state = false;
                 bool current_pad_click = (button_data.buttons & 0x40) != 0; // Bit 6 = pad click
 
-                // Trigger haptic on trackpad click (rising edge)
-                if (current_pad_click && !last_pad_click_state && haptic_is_available())
+                // Trigger haptic on trackpad click press or release (rising and falling edge)
+                if (current_pad_click != last_pad_click_state && haptic_is_available())
                 {
                         gpio_pin_set_dt(&haptic_trigger, 1);
                         k_sleep(K_USEC(100));
@@ -1876,27 +1902,42 @@ int main(void)
                 controller_storage_load_calibration(&controller_calibration);
                 controller_storage_load_bindings(&controller_bindings);
                 controller_storage_load_preferences(&controller_preferences);
+                
+                // Debug: Show what was loaded from flash
+                LOG_INF("=== LOADED CALIBRATION FROM FLASH ===");
+                LOG_INF("Stick X: center=%d, min=%d, max=%d, deadzone=%d",
+                        controller_calibration.stick_center_x,
+                        controller_calibration.stick_min_x,
+                        controller_calibration.stick_max_x,
+                        controller_calibration.stick_deadzone);
+                LOG_INF("Stick Y: center=%d, min=%d, max=%d",
+                        controller_calibration.stick_center_y,
+                        controller_calibration.stick_min_y,
+                        controller_calibration.stick_max_y);
+                LOG_INF("Trigger: min=%d, max=%d",
+                        controller_calibration.trigger_min,
+                        controller_calibration.trigger_max);
 
                 // Apply loaded analog calibration values to analog driver
                 if (controller_calibration.stick_calibrated && analog_driver_is_initialized())
                 {
                         analog_calibration_t stick_x_cal = {
                             .center_value = controller_calibration.stick_center_x,
-                            .min_value = 0,
-                            .max_value = 4095,
+                            .min_value = controller_calibration.stick_min_x,
+                            .max_value = controller_calibration.stick_max_x,
                             .deadzone = controller_calibration.stick_deadzone,
                             .is_calibrated = true};
                         analog_calibration_t stick_y_cal = {
                             .center_value = controller_calibration.stick_center_y,
-                            .min_value = 0,
-                            .max_value = 4095,
+                            .min_value = controller_calibration.stick_min_y,
+                            .max_value = controller_calibration.stick_max_y,
                             .deadzone = controller_calibration.stick_deadzone,
                             .is_calibrated = true};
                         analog_calibration_t trigger_cal = {
                             .center_value = controller_calibration.trigger_min,
                             .min_value = controller_calibration.trigger_min,
                             .max_value = controller_calibration.trigger_max,
-                            .deadzone = 50,
+                            .deadzone = (controller_calibration.trigger_max - controller_calibration.trigger_min) * 0.20f, // 20% of range
                             .is_calibrated = true};
 
                         analog_driver_set_calibration(ANALOG_CHANNEL_STICK_X, &stick_x_cal);
@@ -2111,6 +2152,192 @@ int main(void)
                         display_set_screen(DISPLAY_SCREEN_STATUS, NULL);
                 }
 
+                // Calibration mode: Hold STICK_CLICK + PAD_CLICK for 3 seconds
+                static bool calibration_combo_active = false;
+                static uint32_t calibration_combo_start = 0;
+                static bool calibration_in_progress = false;
+                bool stick_click_pressed = gpio_pin_get_dt(&stick_click);
+                bool pad_click_pressed = gpio_pin_get_dt(&pad_click);
+
+                if (stick_click_pressed && pad_click_pressed && !calibration_combo_active && !sleep_combo_active && !calibration_in_progress)
+                {
+                        calibration_combo_start = k_uptime_get_32();
+                        calibration_combo_active = true;
+                        LOG_INF(">>> CALIBRATION COMBO DETECTED <<<");
+                        LOG_INF(">>> KEEP HOLDING BOTH BUTTONS FOR 3 SECONDS <<<");
+
+                        // Haptic feedback to indicate combo started
+                        if (haptic_is_available())
+                        {
+                                gpio_pin_set_dt(&haptic_trigger, 1);
+                                k_sleep(K_USEC(100));
+                                gpio_pin_set_dt(&haptic_trigger, 0);
+                        }
+                }
+                else if ((!stick_click_pressed || !pad_click_pressed) && calibration_combo_active && !calibration_in_progress)
+                {
+                        LOG_INF("Calibration combo cancelled (buttons released too early)");
+                        calibration_combo_active = false;
+                }
+
+                if (calibration_combo_active && !calibration_in_progress)
+                {
+                        uint32_t hold_time = k_uptime_get_32() - calibration_combo_start;
+
+                        // Haptic feedback every second with progress message
+                        static uint32_t last_cal_haptic = 0;
+                        uint32_t seconds_held = hold_time / 1000;
+                        if (seconds_held > 0 && (seconds_held * 1000) > last_cal_haptic && haptic_is_available())
+                        {
+                                gpio_pin_set_dt(&haptic_trigger, 1);
+                                k_sleep(K_USEC(50));
+                                gpio_pin_set_dt(&haptic_trigger, 0);
+                                last_cal_haptic = seconds_held * 1000;
+                                LOG_INF(">>> HOLD PROGRESS: %u/3 seconds <<<", seconds_held);
+                        }
+
+                        if (hold_time >= 3000)
+                        { // 3 seconds - start calibration
+                                LOG_INF("=== STARTING INTERACTIVE CALIBRATION ===");
+                                calibration_combo_active = false;
+                                calibration_in_progress = true;  // Mark calibration as active
+
+                                // Triple haptic to confirm
+                                if (haptic_is_available())
+                                {
+                                        for (int i = 0; i < 3; i++)
+                                        {
+                                                gpio_pin_set_dt(&haptic_trigger, 1);
+                                                k_sleep(K_MSEC(100));
+                                                gpio_pin_set_dt(&haptic_trigger, 0);
+                                                k_sleep(K_MSEC(100));
+                                        }
+                                }
+
+                                // Switch to calibration display
+                                calibration_phase = 0;
+                                calibration_progress = 0;
+                                display_set_screen(DISPLAY_SCREEN_CALIBRATION, NULL);
+                                k_sleep(K_MSEC(100));  // Give display thread time to switch
+
+                                LOG_INF(">>> CALIBRATION STARTING - 10 SECONDS <<<");
+                                LOG_INF(">>> CENTER THE STICK - DO NOT TOUCH <<<");
+                                
+                                // Begin calibration collection
+                                analog_driver_begin_calibration_collection();
+                                
+                                // Collect calibration data with visual feedback
+                                uint32_t cal_start = k_uptime_get_32();
+                                uint32_t cal_duration = 10000; // 10 seconds total
+                                bool gave_movement_instruction = false;
+                                
+                                while ((k_uptime_get_32() - cal_start) < cal_duration)
+                                {
+                                        // Calculate progress
+                                        uint32_t elapsed = k_uptime_get_32() - cal_start;
+                                        calibration_progress = (elapsed * 100) / cal_duration;
+                                        
+                                        // Update phase at 2 seconds
+                                        if (elapsed >= 2000 && !gave_movement_instruction) {
+                                                calibration_phase = 1;
+                                                LOG_INF(">>> MOVE STICK IN CIRCLES & PULL TRIGGER <<<");
+                                                gave_movement_instruction = true;
+                                        }
+                                        
+                                        // Update calibration data
+                                        analog_driver_update_calibration_data();
+                                        
+                                        k_sleep(K_MSEC(20)); // 50Hz update
+                                }
+                                
+                                // Finalize calibration
+                                analog_status_t cal_status = analog_driver_finalize_calibration();
+
+                                        if (cal_status == ANALOG_STATUS_OK)
+                                        {
+                                                LOG_INF("Calibration successful - saving to flash...");
+
+                                                // Get calibration data from analog driver
+                                                analog_calibration_t stick_x_cal, stick_y_cal, trigger_cal;
+
+                                                if (analog_driver_get_calibration(ANALOG_CHANNEL_STICK_X, &stick_x_cal) == ANALOG_STATUS_OK)
+                                                {
+                                                        controller_calibration.stick_center_x = stick_x_cal.center_value;
+                                                        controller_calibration.stick_min_x = stick_x_cal.min_value;
+                                                        controller_calibration.stick_max_x = stick_x_cal.max_value;
+                                                        controller_calibration.stick_deadzone = stick_x_cal.deadzone;
+                                                        
+                                                        LOG_INF("Stick X: center=%d, min=%d, max=%d, deadzone=%d",
+                                                                stick_x_cal.center_value, stick_x_cal.min_value,
+                                                                stick_x_cal.max_value, stick_x_cal.deadzone);
+                                                }
+
+                                                if (analog_driver_get_calibration(ANALOG_CHANNEL_STICK_Y, &stick_y_cal) == ANALOG_STATUS_OK)
+                                                {
+                                                        controller_calibration.stick_center_y = stick_y_cal.center_value;
+                                                        controller_calibration.stick_min_y = stick_y_cal.min_value;
+                                                        controller_calibration.stick_max_y = stick_y_cal.max_value;
+                                                        
+                                                        LOG_INF("Stick Y: center=%d, min=%d, max=%d",
+                                                                stick_y_cal.center_value, stick_y_cal.min_value,
+                                                                stick_y_cal.max_value);
+                                                }
+
+                                                if (analog_driver_get_calibration(ANALOG_CHANNEL_TRIGGER, &trigger_cal) == ANALOG_STATUS_OK)
+                                                {
+                                                        controller_calibration.trigger_min = trigger_cal.min_value;
+                                                        controller_calibration.trigger_max = trigger_cal.max_value;
+                                                        
+                                                        LOG_INF("Trigger: min=%d, max=%d",
+                                                                trigger_cal.min_value, trigger_cal.max_value);
+                                                }
+
+                                                controller_calibration.stick_calibrated = true;
+                                                controller_calibration.trigger_calibrated = true;
+
+                                                // Save to flash
+                                                int save_ret = controller_storage_save_calibration(&controller_calibration);
+                                                if (save_ret == 0)
+                                                {
+                                                        LOG_INF("✓ Calibration saved to flash successfully!");
+
+                                                        // Success haptic pattern (long buzz)
+                                                        if (haptic_is_available())
+                                                        {
+                                                                gpio_pin_set_dt(&haptic_trigger, 1);
+                                                                k_sleep(K_MSEC(500));
+                                                                gpio_pin_set_dt(&haptic_trigger, 0);
+                                                        }
+                                                }
+                                                else
+                                                {
+                                                        LOG_ERR("✗ Failed to save calibration to flash: %d", save_ret);
+
+                                                        // Error haptic pattern (fast buzzes)
+                                                        if (haptic_is_available())
+                                                        {
+                                                                for (int i = 0; i < 5; i++)
+                                                                {
+                                                                        gpio_pin_set_dt(&haptic_trigger, 1);
+                                                                        k_sleep(K_MSEC(50));
+                                                                        gpio_pin_set_dt(&haptic_trigger, 0);
+                                                                        k_sleep(K_MSEC(50));
+                                                                }
+                                                        }
+                                                }
+                                        }
+                                        else
+                                        {
+                                                LOG_ERR("Calibration failed: %d", cal_status);
+                                        }
+                                
+                                // Return to status screen and mark calibration complete
+                                calibration_in_progress = false;
+                                display_set_screen(DISPLAY_SCREEN_STATUS, NULL);
+                                LOG_INF("=== CALIBRATION MODE EXITED ===");
+                        }
+                }
+
                 if (start_pressed && bumper_pressed && !sleep_combo_active)
                 {
                         sleep_combo_start = k_uptime_get_32();
@@ -2289,10 +2516,26 @@ int main(void)
                         last_health_check = now;
                 }
 
+                // Get delay from PREVIOUS transmission BEFORE we transmit (transmit will update it)
+                static uint16_t current_sleep_delay = 8; // Start with default
+                uint16_t sleep_delay = current_sleep_delay;
+
+                // Track when this iteration started
+                uint32_t iteration_start = k_uptime_get_32();
+
                 // Measure ESB transmission time
                 uint32_t tx_start_cycles = k_cycle_get_32();
 
-                // Attempt to send controller data (with built-in timing control)
+                // Track actual interval between transmissions
+                static uint32_t last_tx_time = 0;
+                uint32_t tx_time_now = k_uptime_get_32();
+                uint32_t actual_interval = 0;
+                if (last_tx_time > 0) {
+                        actual_interval = tx_time_now - last_tx_time;
+                }
+                last_tx_time = tx_time_now;
+
+                // Attempt to send controller data (this will update next_delay for NEXT iteration)
                 esb_comm_status_t tx_status = send_controller_data();
 
                 // Debug: Track transmission attempts every 5 seconds during potential issues
@@ -2452,19 +2695,42 @@ int main(void)
                         }
                 }
 
-                // Dynamic loop delay based on ACK payload timing - split into two parts
-                uint16_t next_delay = esb_comm_get_next_delay();
-                uint16_t sleep_delay;
+                // Update controller data immediately after transmission (don't wait)
+                uint32_t update_start_cycles = k_cycle_get_32();
+                update_controller_data();
+                uint32_t update_end_cycles = k_cycle_get_32();
+                uint32_t update_us = k_cyc_to_us_floor32(update_end_cycles - update_start_cycles);
 
+                // Track longest controller update time
+                static uint32_t max_update_us = 0;
+                if (update_us > max_update_us)
+                {
+                        max_update_us = update_us;
+                }
+
+                // Log if controller update takes too long (>10ms is suspicious)
+                if (update_us > 10000)
+                {
+                        LOG_WRN("SLOW CONTROLLER UPDATE: %dus (max: %dus)", update_us, max_update_us);
+                }
+
+                // Get delay for NEXT transmission from ACK payload (was updated during send_controller_data)
+                uint16_t next_delay = esb_comm_get_next_delay();
+
+                // Calculate what sleep delay to use for NEXT iteration
                 if (next_delay > 0 && next_delay <= 100)
                 {
                         // Use dongle-requested timing (limited to reasonable range)
-                        sleep_delay = next_delay;
+                        current_sleep_delay = next_delay;
+                        // LOG_DBG("Dongle requested %dms for next TX (actual interval was: %ums, used delay: %ums)", 
+                        //         next_delay, actual_interval, sleep_delay);
                 }
                 else
                 {
                         // Fallback to default timing if no ACK payload or invalid timing
-                        sleep_delay = 8;
+                        current_sleep_delay = 8;
+                        LOG_WRN("Invalid dongle delay (%d), using fallback: %dms for next TX (actual interval was: %ums, used delay: %ums)", 
+                                next_delay, current_sleep_delay, actual_interval, sleep_delay);
                 }
 
                 // Add radio busy backoff - if transmission failed due to busy radio,
@@ -2491,40 +2757,27 @@ int main(void)
                         consecutive_busy_count = 0;
                 }
 
-                // Sleep for half the interval
-                uint16_t half_delay = sleep_delay / 2;
-                if (half_delay > 0)
+                // Subtract the ACTUAL time already spent (from start of iteration to now)
+                uint32_t iteration_end = k_uptime_get_32();
+                uint32_t elapsed_ms = iteration_end - iteration_start;
+                
+                if (elapsed_ms < sleep_delay)
                 {
-                        k_sleep(K_MSEC(half_delay));
+                        sleep_delay -= elapsed_ms;
+                }
+                else
+                {
+                        sleep_delay = 0; // No sleep needed, already over time
                 }
 
-                // Measure controller data update time
-                uint32_t update_start_cycles = k_cycle_get_32();
-
-                // Update sensor data halfway through the transmission interval
-                update_controller_data();
-
-                uint32_t update_end_cycles = k_cycle_get_32();
-                uint32_t update_us = k_cyc_to_us_floor32(update_end_cycles - update_start_cycles);
-
-                // Track longest controller update time
-                static uint32_t max_update_us = 0;
-                if (update_us > max_update_us)
+                // Wait the calculated delay before next transmission (minimum 1ms to yield)
+                if (sleep_delay > 0)
                 {
-                        max_update_us = update_us;
+                        k_sleep(K_MSEC(sleep_delay));
                 }
-
-                // Log if controller update takes too long (>10ms is suspicious)
-                if (update_us > 10000)
+                else
                 {
-                        LOG_WRN("SLOW CONTROLLER UPDATE: %dus (max: %dus)", update_us, max_update_us);
-                }
-
-                // Sleep for the remaining time
-                uint16_t remaining_delay = sleep_delay - half_delay;
-                if (remaining_delay > 0)
-                {
-                        k_sleep(K_MSEC(remaining_delay));
+                        k_yield(); // Just yield to scheduler if no sleep needed
                 }
 
                 // Complete loop timing measurement
