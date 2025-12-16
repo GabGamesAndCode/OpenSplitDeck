@@ -15,6 +15,8 @@
 #include <esb.h>
 #include "esb_comm_driver.h"
 
+#define PLAYER_ID 2     // Change to 1 for PLAYER 1, 2 for PLAYER 2 (different address set)
+
 LOG_MODULE_REGISTER(esb_comm, LOG_LEVEL_ERR);
 
 // ESB communication context
@@ -264,10 +266,27 @@ esb_comm_status_t esb_comm_driver_init(const esb_comm_config_t *config)
     esb_cfg.use_fast_ramp_up = false;  // Disable fast ramp up for stability during ADC activity
     esb_cfg.payload_length = 21;
 
-    // Set up addresses - matching Nordic reference pattern
-    uint8_t base_addr_0[4] = {0xE7, 0xE7, 0xE7, 0xE7}; // RIGHT controller base (pipe 0)
-    uint8_t base_addr_1[4] = {0xD4, 0xD4, 0xD4, 0xD4}; // LEFT controller base (pipe 1)
-    uint8_t addr_prefix[8] = {0xE7, 0xD4, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8};
+    // Set up addresses - Player 1 and Player 2 use different address sets
+    // Each player has unique RIGHT (pipe 0) and LEFT (pipe 1) addresses
+    uint8_t base_addr_0[4]; // RIGHT controller base (pipe 0)
+    uint8_t base_addr_1[4]; // LEFT controller base (pipe 1)
+    uint8_t addr_prefix[8];
+    
+    #if PLAYER_ID == 1
+        // Player 1 addresses
+        base_addr_0[0] = 0xE7; base_addr_0[1] = 0xE7; base_addr_0[2] = 0xE7; base_addr_0[3] = 0xE7;
+        base_addr_1[0] = 0xD4; base_addr_1[1] = 0xD4; base_addr_1[2] = 0xD4; base_addr_1[3] = 0xD4;
+        addr_prefix[0] = 0xE7; addr_prefix[1] = 0xD4; addr_prefix[2] = 0xC3; addr_prefix[3] = 0xC4;
+        addr_prefix[4] = 0xC5; addr_prefix[5] = 0xC6; addr_prefix[6] = 0xC7; addr_prefix[7] = 0xC8;
+    #elif PLAYER_ID == 2
+        // Player 2 addresses
+        base_addr_0[0] = 0xA1; base_addr_0[1] = 0xA1; base_addr_0[2] = 0xA1; base_addr_0[3] = 0xA1;
+        base_addr_1[0] = 0xB2; base_addr_1[1] = 0xB2; base_addr_1[2] = 0xB2; base_addr_1[3] = 0xB2;
+        addr_prefix[0] = 0xA1; addr_prefix[1] = 0xB2; addr_prefix[2] = 0xA3; addr_prefix[3] = 0xA4;
+        addr_prefix[4] = 0xA5; addr_prefix[5] = 0xA6; addr_prefix[6] = 0xA7; addr_prefix[7] = 0xA8;
+    #else
+        #error "PLAYER_ID must be 1 or 2"
+    #endif
 
     err = esb_init(&esb_cfg);
     if (err)

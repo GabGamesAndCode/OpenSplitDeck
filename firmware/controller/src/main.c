@@ -13,7 +13,8 @@
 // ========================
 // CONTROLLER CONFIGURATION
 // ========================
-#define CONTROLLER_ID 1 // Change to 0 for RIGHT controller, 1 for LEFT controller
+#define CONTROLLER_ID 0 // Change to 0 for RIGHT controller, 1 for LEFT controller
+
 
 // FREEZE DEBUGGING - Temporarily disable components to isolate freezing source
 #define FREEZE_DEBUG_DISABLE_ADC 0 // Set to 1 to disable ADC reads
