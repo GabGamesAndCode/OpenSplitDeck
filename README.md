@@ -96,8 +96,7 @@ Coming soon — demo images, build progress, and gameplay tests.
 
 - [Video Build Guide](https://youtu.be/64-y5n9kIJc)
 
-- Written Build Guide
-  _(Coming soon)__
+- [Written Build Guide](https://github.com/tommybee456/OpenSplitDeck/blob/main/Docs/OpenSplitDeck_Build_Guide.pdf)
 
   
 
