@@ -85,18 +85,16 @@ Coming soon — demo images, build progress, and gameplay tests.
   [RightPCB](https://oshwlab.com/fbrains69/opensteamdeck-rightpcb)
 
   [Trackpad](https://oshwlab.com/fbrains69/steamdeck-controller-trackpad-v1-2)
-
-- Firmware flashing instructions
-
-  _(Coming soon)_
   
-- BOM and Tools
+- BOM and Tools:
 
   [Current BOM - Living Sheet (Im Trying to find the best way to source everything still)](https://docs.google.com/spreadsheets/d/1LNsZTH84R0wy0S3vBu-m3nQxl8zSZT1IippI82DKSO4/edit?usp=sharing)
 
-- [Video Build Guide](https://youtu.be/64-y5n9kIJc)
+- Build Guide:
 
-- [Written Build Guide](https://github.com/tommybee456/OpenSplitDeck/blob/main/Docs/OpenSplitDeck_Build_Guide.pdf)
+  [Video Build Guide](https://youtu.be/64-y5n9kIJc)
+
+  [Written Build Guide](https://github.com/tommybee456/OpenSplitDeck/blob/main/Docs/OpenSplitDeck_Build_Guide.pdf)
 
   
 
